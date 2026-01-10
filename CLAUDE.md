@@ -12,10 +12,10 @@ Directus interface extension that adds **Prev/Next navigation buttons** to item 
 npm install
 npm run build          # Production build to dist/
 npm run dev            # Watch mode for development
-# ./deploy.sh          # (Deprecated/Removed) Build, copy to extensions, restart Directus
+./deploy.sh            # Local deployment (ignored from git)
 ```
 
-**IMPORTANT:** This is a standalone extension repository. For project-specific deployment, manually copy `dist/` and `package.json` to your Directus extensions directory.
+**IMPORTANT:** `deploy.sh` is ignored by git but can be used for local development to build, copy to extensions, and restart Directus.
 
 ## Architecture
 
