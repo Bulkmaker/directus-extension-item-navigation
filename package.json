@@ -1,0 +1,42 @@
+{
+    "name": "directus-extension-item-navigation",
+    "version": "1.0.0",
+    "description": "Prev/Next navigation buttons for Directus item edit pages with position counter",
+    "icon": "swap_horiz",
+    "keywords": [
+        "directus",
+        "directus-extension",
+        "navigation",
+        "prev-next",
+        "pagination",
+        "item-navigation",
+        "interface"
+    ],
+    "author": "Miša <ibull37@gmail.com>",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/bulkmaker/directus-extension-item-navigation"
+    },
+    "homepage": "https://github.com/bulkmaker/directus-extension-item-navigation#readme",
+    "bugs": {
+        "url": "https://github.com/bulkmaker/directus-extension-item-navigation/issues"
+    },
+    "type": "module",
+    "directus:extension": {
+        "type": "interface",
+        "path": "dist/index.js",
+        "source": "src/index.ts",
+        "host": "^10.10.0 || ^11.0.0"
+    },
+    "scripts": {
+        "build": "directus-extension build",
+        "dev": "directus-extension build -w --no-minify"
+    },
+    "devDependencies": {
+        "@directus/extensions-sdk": "^12.0.1",
+        "@types/node": "^20.0.0",
+        "typescript": "^5.0.0",
+        "vue": "^3.4.0"
+    }
+}
