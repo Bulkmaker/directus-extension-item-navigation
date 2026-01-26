@@ -1,11 +1,12 @@
 import { defineInterface } from '@directus/extensions-sdk';
 import InterfaceComponent from './interface.vue';
+import { t } from './i18n';
 
 export default defineInterface({
     id: 'item-navigation',
-    name: 'Item Navigation',
+    name: t('interfaceName'),
     icon: 'swap_horiz',
-    description: 'Prev/Next navigation buttons for items',
+    description: t('interfaceDescription'),
     component: InterfaceComponent,
     types: ['alias'],
     localTypes: ['presentation'],
@@ -13,7 +14,7 @@ export default defineInterface({
     options: ({ collection }) => [
         {
             field: 'sortField',
-            name: 'Sort Field',
+            name: t('sortFieldLabel'),
             type: 'string',
             meta: {
                 width: 'half',
@@ -23,7 +24,7 @@ export default defineInterface({
                     allowNone: true,
                     allowPrimaryKey: true,
                 },
-                note: 'Leave empty to auto-detect (sort → id)',
+                note: t('sortFieldNote'),
             },
             schema: {
                 default_value: null,
@@ -31,15 +32,15 @@ export default defineInterface({
         },
         {
             field: 'sortDirection',
-            name: 'Sort Direction',
+            name: t('sortDirectionLabel'),
             type: 'string',
             meta: {
                 width: 'half',
                 interface: 'select-dropdown',
                 options: {
                     choices: [
-                        { text: 'Ascending', value: 'asc' },
-                        { text: 'Descending', value: 'desc' },
+                        { text: t('directionAscending'), value: 'asc' },
+                        { text: t('directionDescending'), value: 'desc' },
                     ],
                 },
             },
@@ -49,12 +50,12 @@ export default defineInterface({
         },
         {
             field: 'showLabels',
-            name: 'Show Labels',
+            name: t('showLabelsLabel'),
             type: 'boolean',
             meta: {
                 width: 'half',
                 interface: 'boolean',
-                note: 'Show Prev/Next text on buttons',
+                note: t('showLabelsNote'),
             },
             schema: {
                 default_value: true,

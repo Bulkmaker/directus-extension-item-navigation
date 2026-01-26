@@ -27,9 +27,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from 'vue';
-import { useApi, useStores } from '@directus/extensions-sdk';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { useApi, useStores } from '@directus/extensions-sdk';
+import { t } from './i18n';
 
 interface Props {
     collection: string;
@@ -54,15 +55,6 @@ const loading = ref(false);
 const prevId = ref<string | number | null>(null);
 const nextId = ref<string | number | null>(null);
 const position = ref<{ current: number; total: number } | null>(null);
-
-const t = (key: string) => {
-    const translations: Record<string, Record<string, string>> = {
-        prev: { en: 'Prev', ru: 'Назад' },
-        next: { en: 'Next', ru: 'Далее' },
-    };
-    const lang = navigator.language.startsWith('ru') ? 'ru' : 'en';
-    return translations[key]?.[lang] || key;
-};
 
 const currentId = computed(() => {
     // Get ID from props or route
