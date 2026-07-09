@@ -1,50 +1,50 @@
 <template>
-    <div class="item-navigation">
-        <button
-            class="nav-button prev"
-            :class="{ disabled: !prevId }"
-            :disabled="!prevId || loading"
-            @click="navigateTo(prevId)"
-        >
-            <v-icon name="chevron_left" />
-            <span v-if="showLabels" class="label">{{ t('prev') }}</span>
-        </button>
+	<div class="item-navigation">
+		<button
+			class="nav-button prev"
+			:class="{ disabled: !prevId }"
+			:disabled="!prevId || loading"
+			@click="navigate(prevId)"
+		>
+			<v-icon name="chevron_left" />
+			<span v-if="showLabels" class="label">{{ translate('prev') }}</span>
+		</button>
 
-        <span class="position" v-if="position">
-            {{ position.current }} / {{ position.total }}
-        </span>
+		<span v-if="positionInfo" class="position">
+			{{ positionInfo.current }} / {{ positionInfo.total }}
+		</span>
 
-        <button
-            class="nav-button next"
-            :class="{ disabled: !nextId }"
-            :disabled="!nextId || loading"
-            @click="navigateTo(nextId)"
-        >
-            <span v-if="showLabels" class="label">{{ t('next') }}</span>
-            <v-icon name="chevron_right" />
-        </button>
-    </div>
+		<button
+			class="nav-button next"
+			:class="{ disabled: !nextId }"
+			:disabled="!nextId || loading"
+			@click="navigate(nextId)"
+		>
+			<span v-if="showLabels" class="label">{{ translate('next') }}</span>
+			<v-icon name="chevron_right" />
+		</button>
+	</div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useApi, useStores } from '@directus/extensions-sdk';
-import { t } from './i18n';
+import { useRoute, useRouter } from 'vue-router';
 
-interface Props {
-    collection: string;
-    primaryKey: string | number;
-    sortField?: string;
-    sortDirection?: 'asc' | 'desc';
-    showLabels?: boolean;
-}
-
-const props = withDefaults(defineProps<Props>(), {
-    sortField: '',
-    sortDirection: 'asc',
-    showLabels: true,
-});
+const props = withDefaults(
+	defineProps<{
+		collection: string;
+		primaryKey: string;
+		sortField?: string;
+		sortDirection?: string;
+		showLabels?: boolean;
+	}>(),
+	{
+		sortField: '',
+		sortDirection: 'asc',
+		showLabels: true,
+	}
+);
 
 const api = useApi();
 const route = useRoute();
@@ -54,169 +54,346 @@ const { useFieldsStore } = useStores();
 const loading = ref(false);
 const prevId = ref<string | number | null>(null);
 const nextId = ref<string | number | null>(null);
-const position = ref<{ current: number; total: number } | null>(null);
+const positionInfo = ref<{ current: number; total: number } | null>(null);
 
-const currentId = computed(() => {
-    // Get ID from props or route
-    if (props.primaryKey && props.primaryKey !== '+') {
-        return props.primaryKey;
-    }
-    return route.params.primaryKey as string;
+const currentPrimaryKey = computed(() => {
+	if (props.primaryKey && props.primaryKey !== '+') {
+		return props.primaryKey;
+	}
+	return route.params.primaryKey as string;
 });
 
+const translate = (key: 'prev' | 'next') => {
+	const lang = navigator.language.startsWith('ru') ? 'ru' : 'en';
+	const translations = {
+		prev: { en: 'Prev', ru: 'Назад' },
+		next: { en: 'Next', ru: 'Далее' },
+	};
+	return translations[key][lang] || key;
+};
+
 async function fetchNavigation() {
-    if (!currentId.value || currentId.value === '+') {
-        return;
-    }
+	const currentId = currentPrimaryKey.value;
+	if (!currentId || currentId === '+') {
+		prevId.value = null;
+		nextId.value = null;
+		positionInfo.value = null;
+		return;
+	}
 
-    loading.value = true;
+	loading.value = true;
+	try {
+		const fieldsStore = useFieldsStore();
+		const fields = fieldsStore.getFieldsForCollection(props.collection) || [];
+		
+		const pkFieldObj = fields.find((f: any) => f.schema?.is_primary_key);
+		const pkField = pkFieldObj?.field || 'id';
 
-    try {
-        const fieldsStore = useFieldsStore();
-        const fields = fieldsStore.getFieldsForCollection(props.collection);
+		// 1. Fetch current user ID to get their specific preset
+		let currentUserId = null;
+		try {
+			const meRes = await api.get('/users/me', { params: { fields: ['id'] } });
+			currentUserId = meRes.data?.data?.id;
+		} catch (err) {
+			console.warn('Could not fetch current user info:', err);
+		}
 
-        // Determine sort field
-        let sortField = props.sortField;
-        if (!sortField) {
-            // Try to find sort field in collection
-            const sortFieldObj = fields?.find((f: any) => f.field === 'sort');
-            if (sortFieldObj) {
-                sortField = 'sort';
-            } else {
-                // Fall back to primary key
-                const pkField = fields?.find((f: any) => f.schema?.is_primary_key);
-                sortField = pkField?.field || 'id';
-            }
-        }
+		// 2. Query active preset for this collection and user (stores current sorting/filtering)
+		let activeSort: string[] = [];
+		let activeFilter: any = null;
+		let activeSearch: string | null = null;
 
-        const direction = props.sortDirection || 'asc';
+		try {
+			const presetParams: any = {
+				filter: {
+					collection: { _eq: props.collection },
+					bookmark: { _null: true },
+				},
+			};
+			if (currentUserId) {
+				presetParams.filter.user = { _eq: currentUserId };
+			}
+			const presetRes = await api.get('/presets', { params: presetParams });
+			const preset = presetRes.data?.data?.[0];
+			if (preset) {
+				const layout = preset.layout || 'tabular';
+				const layoutQuery = preset.layout_query?.[layout] || {};
+				activeSort = layoutQuery.sort || [];
+				activeFilter = preset.filter || null;
+				activeSearch = preset.search || null;
+			}
+		} catch (err) {
+			console.warn('Could not fetch preset:', err);
+		}
 
-        // First, get total count and current item's sort value
-        const currentResponse = await api.get(`/items/${props.collection}/${currentId.value}`, {
-            params: { fields: ['id', sortField] },
-        });
+		// 3. Determine sorting query based on active preset or fallback
+		let sortQuery: string[] = [];
+		if (activeSort && activeSort.length > 0) {
+			sortQuery = [...activeSort];
+			const primarySort = activeSort[0];
+			const isDesc = primarySort.startsWith('-');
+			if (!sortQuery.includes(pkField) && !sortQuery.includes(`-${pkField}`)) {
+				sortQuery.push(isDesc ? `-${pkField}` : pkField);
+			}
+		} else {
+			let sortField = props.sortField;
+			if (!sortField) {
+				if (fields.find((f: any) => f.field === 'sort')) {
+					sortField = 'sort';
+				} else {
+					sortField = pkField;
+				}
+			}
+			const dir = props.sortDirection || 'asc';
+			sortQuery = dir === 'desc' ? [`-${sortField}`, `-${pkField}`] : [sortField, pkField];
+		}
 
-        const currentSortValue = currentResponse.data.data[sortField];
+		// 4. Fetch total count using active preset filters/search
+		const countParams: any = {};
+		if (activeFilter) countParams.filter = activeFilter;
+		if (activeSearch) countParams.search = activeSearch;
 
-        // Get total count
-        const countResponse = await api.get(`/items/${props.collection}`, {
-            params: {
-                aggregate: { count: '*' },
-            },
-        });
-        const total = parseInt(countResponse.data.data[0]?.count || '0', 10);
+		const countRes = await api.get(`/items/${props.collection}`, {
+			params: {
+				...countParams,
+				aggregate: { count: '*' },
+			},
+		});
+		const totalCount = parseInt(countRes.data?.data?.[0]?.count || '0', 10);
 
-        // Get previous item
-        const prevOperator = direction === 'asc' ? '_lt' : '_gt';
-        const prevSort = direction === 'asc' ? `-${sortField}` : sortField;
+		// If total count is small (e.g. < 5000), fetch all matching IDs in-memory
+		if (totalCount < 5000) {
+			const queryParams: any = {
+				fields: [pkField],
+				sort: sortQuery,
+				limit: -1,
+			};
+			if (activeFilter) queryParams.filter = activeFilter;
+			if (activeSearch) queryParams.search = activeSearch;
 
-        const prevResponse = await api.get(`/items/${props.collection}`, {
-            params: {
-                filter: { [sortField]: { [prevOperator]: currentSortValue } },
-                sort: [prevSort],
-                limit: 1,
-                fields: ['id'],
-            },
-        });
-        prevId.value = prevResponse.data.data[0]?.id || null;
+			const allIdsRes = await api.get(`/items/${props.collection}`, {
+				params: queryParams,
+			});
 
-        // Get next item
-        const nextOperator = direction === 'asc' ? '_gt' : '_lt';
-        const nextSort = direction === 'asc' ? sortField : `-${sortField}`;
+			const ids: (string | number)[] = (allIdsRes.data?.data || []).map((item: any) => item[pkField]);
+			
+			// Normalize current ID for lookup
+			const parsedCurrentId = typeof ids[0] === 'number' ? Number(currentId) : String(currentId);
+			const index = ids.indexOf(parsedCurrentId);
 
-        const nextResponse = await api.get(`/items/${props.collection}`, {
-            params: {
-                filter: { [sortField]: { [nextOperator]: currentSortValue } },
-                sort: [nextSort],
-                limit: 1,
-                fields: ['id'],
-            },
-        });
-        nextId.value = nextResponse.data.data[0]?.id || null;
+			if (index !== -1) {
+				prevId.value = index > 0 ? ids[index - 1] : null;
+				nextId.value = index < ids.length - 1 ? ids[index + 1] : null;
+				positionInfo.value = {
+					current: index + 1,
+					total: ids.length,
+				};
+			} else {
+				// Fallback if current item doesn't match active filters:
+				// Load unfiltered IDs so navigation still functions
+				const fallbackIdsRes = await api.get(`/items/${props.collection}`, {
+					params: {
+						fields: [pkField],
+						sort: sortQuery,
+						limit: -1,
+					},
+				});
+				const fallbackIds: (string | number)[] = (fallbackIdsRes.data?.data || []).map((item: any) => item[pkField]);
+				const fallbackIndex = fallbackIds.indexOf(parsedCurrentId);
 
-        // Calculate position
-        const positionResponse = await api.get(`/items/${props.collection}`, {
-            params: {
-                filter: { [sortField]: { [prevOperator]: currentSortValue } },
-                aggregate: { count: '*' },
-            },
-        });
-        const beforeCount = parseInt(positionResponse.data.data[0]?.count || '0', 10);
-        position.value = {
-            current: direction === 'asc' ? beforeCount + 1 : total - beforeCount,
-            total: total,
-        };
+				if (fallbackIndex !== -1) {
+					prevId.value = fallbackIndex > 0 ? fallbackIds[fallbackIndex - 1] : null;
+					nextId.value = fallbackIndex < fallbackIds.length - 1 ? fallbackIds[fallbackIndex + 1] : null;
+					positionInfo.value = {
+						current: fallbackIndex + 1,
+						total: fallbackIds.length,
+					};
+				} else {
+					prevId.value = null;
+					nextId.value = null;
+					positionInfo.value = {
+						current: 1,
+						total: totalCount || 1,
+					};
+				}
+			}
+		} else {
+			// Fallback for large datasets: cursor-based pagination
+			const primarySort = sortQuery[0] || pkField;
+			const isDesc = primarySort.startsWith('-');
+			const sortFieldName = isDesc ? primarySort.slice(1) : primarySort;
+			const dir = isDesc ? 'desc' : 'asc';
 
-    } catch (error) {
-        console.error('Navigation fetch error:', error);
-    } finally {
-        loading.value = false;
-    }
+			const currentItemRes = await api.get(`/items/${props.collection}/${currentId}`, {
+				params: {
+					fields: [pkField, sortFieldName],
+				},
+			});
+			const currentSortVal = currentItemRes.data?.data?.[sortFieldName];
+
+			const getNeighbor = async (isNext: boolean) => {
+				const isAsc = dir === 'asc';
+				const gtOperator = isAsc ? '_gt' : '_lt';
+				const ltOperator = isAsc ? '_lt' : '_gt';
+				const operator = isNext ? gtOperator : ltOperator;
+				
+				const neighborSortQuery = isNext
+					? (isAsc ? [sortFieldName, pkField] : [`-${sortFieldName}`, `-${pkField}`])
+					: (isAsc ? [`-${sortFieldName}`, `-${pkField}`] : [sortFieldName, pkField]);
+
+				let neighborFilter: any = {};
+				
+				if (currentSortVal !== null && currentSortVal !== undefined) {
+					neighborFilter = {
+						_or: [
+							{ [sortFieldName]: { [operator]: currentSortVal } },
+							{
+								_and: [
+									{ [sortFieldName]: { _eq: currentSortVal } },
+									{ [pkField]: { [isNext ? '_gt' : '_lt']: currentId } }
+								]
+							}
+						]
+					};
+				} else {
+					neighborFilter = {
+						[sortFieldName]: { _null: true },
+						[pkField]: { [isNext ? '_gt' : '_lt']: currentId }
+					};
+				}
+
+				if (activeFilter) {
+					neighborFilter = {
+						_and: [activeFilter, neighborFilter],
+					};
+				}
+
+				const res = await api.get(`/items/${props.collection}`, {
+					params: {
+						filter: neighborFilter,
+						search: activeSearch || undefined,
+						sort: neighborSortQuery,
+						limit: 1,
+						fields: [pkField],
+					},
+				});
+				return res.data?.data?.[0]?.[pkField] || null;
+			};
+
+			prevId.value = await getNeighbor(false);
+			nextId.value = await getNeighbor(true);
+
+			let countFilter: any = {};
+			if (currentSortVal !== null && currentSortVal !== undefined) {
+				countFilter = {
+					_or: [
+						{ [sortFieldName]: { [dir === 'asc' ? '_lt' : '_gt']: currentSortVal } },
+						{
+							_and: [
+								{ [sortFieldName]: { _eq: currentSortVal } },
+								{ [pkField]: { _lt: currentId } }
+							]
+						}
+					]
+				};
+			} else {
+				countFilter = {
+					[sortFieldName]: { _null: true },
+					[pkField]: { _lt: currentId }
+				};
+			}
+
+			if (activeFilter) {
+				countFilter = {
+					_and: [activeFilter, countFilter],
+				};
+			}
+
+			const precedingRes = await api.get(`/items/${props.collection}`, {
+				params: {
+					filter: countFilter,
+					search: activeSearch || undefined,
+					aggregate: { count: '*' },
+				},
+			});
+			const precedingCount = parseInt(precedingRes.data?.data?.[0]?.count || '0', 10);
+			positionInfo.value = {
+				current: precedingCount + 1,
+				total: totalCount,
+			};
+		}
+	} catch (err) {
+		console.error('Navigation fetch error:', err);
+		prevId.value = null;
+		nextId.value = null;
+		positionInfo.value = null;
+	} finally {
+		loading.value = false;
+	}
 }
 
-function navigateTo(id: string | number | null) {
-    if (!id) return;
-    router.push(`/content/${props.collection}/${id}`);
+function navigate(id: string | number | null) {
+	if (id !== null && id !== undefined) {
+		router.push(`/content/${props.collection}/${id}`);
+	}
 }
 
 onMounted(() => {
-    fetchNavigation();
+	fetchNavigation();
 });
 
-watch(() => currentId.value, () => {
-    fetchNavigation();
-});
+watch(
+	// Watch both current ID and route query parameters to detect view changes
+	() => [currentPrimaryKey.value, route.query],
+	() => {
+		fetchNavigation();
+	},
+	{ deep: true }
+);
 </script>
 
 <style scoped>
 .item-navigation {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 0;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 0;
 }
-
 .nav-button {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 12px;
-    border: 1px solid var(--theme--border-color);
-    border-radius: var(--theme--border-radius);
-    background: var(--theme--background);
-    color: var(--theme--foreground);
-    cursor: pointer;
-    transition: all 0.15s ease;
-    font-size: 14px;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 6px 12px;
+	border: 1px solid var(--theme--border-color);
+	border-radius: var(--theme--border-radius);
+	background: var(--theme--background);
+	color: var(--theme--foreground);
+	cursor: pointer;
+	transition: all 0.15s ease;
+	font-size: 14px;
 }
-
 .nav-button:hover:not(.disabled) {
-    background: var(--theme--background-accent);
-    border-color: var(--theme--primary);
+	background: var(--theme--background-accent);
+	border-color: var(--theme--primary);
 }
-
 .nav-button.disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+	opacity: 0.4;
+	cursor: not-allowed;
 }
-
 .nav-button .label {
-    font-weight: 500;
+	font-weight: 500;
 }
-
 .position {
-    color: var(--theme--foreground-subdued);
-    font-size: 13px;
-    font-variant-numeric: tabular-nums;
-    min-width: 60px;
-    text-align: center;
+	color: var(--theme--foreground-subdued);
+	font-size: 13px;
+	font-variant-numeric: tabular-nums;
+	min-width: 60px;
+	text-align: center;
 }
-
 .nav-button.prev {
-    padding-left: 8px;
+	padding-left: 8px;
 }
-
 .nav-button.next {
-    padding-right: 8px;
+	padding-right: 8px;
 }
 </style>
