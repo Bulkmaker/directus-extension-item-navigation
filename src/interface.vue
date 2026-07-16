@@ -98,23 +98,44 @@ async function fetchNavigation() {
 			console.warn('Could not fetch current user info:', err);
 		}
 
-		// 2. Query active preset for this collection and user (stores current sorting/filtering)
+		// 2. Resolve the ACTIVE preset for this view: when the item was opened from a
+		// bookmark (?bookmark=<id> in the route), navigate that bookmark's view;
+		// otherwise fall back to the user's/global default preset for the collection.
+		// A stale or foreign bookmark id yields no row and falls through to the default.
 		let activeSort: string[] = [];
 		let activeFilter: any = null;
 		let activeSearch: string | null = null;
 
 		try {
-			const presetParams: any = {
-				filter: {
-					collection: { _eq: props.collection },
-					bookmark: { _null: true },
-				},
-			};
-			if (currentUserId) {
-				presetParams.filter.user = { _eq: currentUserId };
+			let preset: any = null;
+
+			const bookmarkId = route.query.bookmark ? String(route.query.bookmark) : null;
+			if (bookmarkId) {
+				const bookmarkRes = await api.get('/presets', {
+					params: {
+						filter: {
+							id: { _eq: bookmarkId },
+							collection: { _eq: props.collection },
+						},
+					},
+				});
+				preset = bookmarkRes.data?.data?.[0] ?? null;
 			}
-			const presetRes = await api.get('/presets', { params: presetParams });
-			const preset = presetRes.data?.data?.[0];
+
+			if (!preset) {
+				const presetParams: any = {
+					filter: {
+						collection: { _eq: props.collection },
+						bookmark: { _null: true },
+					},
+				};
+				if (currentUserId) {
+					presetParams.filter.user = { _eq: currentUserId };
+				}
+				const presetRes = await api.get('/presets', { params: presetParams });
+				preset = presetRes.data?.data?.[0] ?? null;
+			}
+
 			if (preset) {
 				const layout = preset.layout || 'tabular';
 				const layoutQuery = preset.layout_query?.[layout] || {};
@@ -334,7 +355,8 @@ async function fetchNavigation() {
 
 function navigate(id: string | number | null) {
 	if (id !== null && id !== undefined) {
-		router.push(`/content/${props.collection}/${id}`);
+		// Preserve the current view context (e.g. ?bookmark=<id>) across navigation
+		router.push({ path: `/content/${props.collection}/${id}`, query: route.query });
 	}
 }
 
