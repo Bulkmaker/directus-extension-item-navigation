@@ -56,6 +56,65 @@ const prevId = ref<string | number | null>(null);
 const nextId = ref<string | number | null>(null);
 const positionInfo = ref<{ current: number; total: number } | null>(null);
 
+// The bookmark id whose preset actually resolved for the current view, if any.
+// Used by navigate() to write the context into the URL on Prev/Next, so a
+// recovered context (see resolveActiveBookmarkId) becomes explicit and
+// refresh-stable after the first navigation.
+const activeBookmarkId = ref<string | null>(null);
+
+/**
+ * Extract a bookmark id from a URL/path IF it is this collection's browse view
+ * (e.g. '/content/articles?bookmark=3' or 'https://host/admin/content/articles?bookmark=3').
+ * Anything else — other collections, other origins, no bookmark — yields null.
+ */
+function bookmarkFromViewUrl(url: string | null | undefined): string | null {
+	if (!url) return null;
+	try {
+		const parsed = new URL(url, window.location.origin);
+		if (parsed.origin !== window.location.origin) return null;
+		if (!parsed.pathname.endsWith(`/content/${props.collection}`)) return null;
+		return parsed.searchParams.get('bookmark');
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve the bookmark id of the view the user is actually working in.
+ *
+ * 1. `?bookmark=<id>` in the route — the explicit source (the app's browse→item
+ *    guard carries it over on a normal row click).
+ * 2. vue-router's `history.state.back` — the in-tab origin of this page. Covers
+ *    entries where the URL query is missing, and survives a page refresh (the
+ *    browser persists history entry state across reloads).
+ * 3. `document.referrer` — ONLY when there is no in-tab history yet
+ *    (`history.state.back == null`), i.e. this document is the tab's entry
+ *    point: the item was ctrl/middle-clicked out of the bookmark view into a
+ *    new tab, where neither the query nor history state exists. The referrer is
+ *    also kept by browsers across reloads, so F5 in that tab stays in context.
+ *    After any in-tab navigation the referrer goes stale (it never updates in
+ *    an SPA), hence the guard.
+ *
+ * A recovered id is validated against the presets API by the caller exactly
+ * like an explicit one (collection-guarded; stale/foreign ids fall through to
+ * the default preset).
+ */
+function resolveActiveBookmarkId(): string | null {
+	if (route.query.bookmark) return String(route.query.bookmark);
+
+	const historyBack = typeof history.state?.back === 'string' ? history.state.back : null;
+
+	const fromBack = bookmarkFromViewUrl(historyBack);
+	if (fromBack) return fromBack;
+
+	if (historyBack == null) {
+		const fromReferrer = bookmarkFromViewUrl(document.referrer);
+		if (fromReferrer) return fromReferrer;
+	}
+
+	return null;
+}
+
 const currentPrimaryKey = computed(() => {
 	if (props.primaryKey && props.primaryKey !== '+') {
 		return props.primaryKey;
@@ -99,17 +158,20 @@ async function fetchNavigation() {
 		}
 
 		// 2. Resolve the ACTIVE preset for this view: when the item was opened from a
-		// bookmark (?bookmark=<id> in the route), navigate that bookmark's view;
+		// bookmark (?bookmark=<id> in the route, or recovered from the navigation
+		// context — see resolveActiveBookmarkId), navigate that bookmark's view;
 		// otherwise fall back to the user's/global default preset for the collection.
 		// A stale or foreign bookmark id yields no row and falls through to the default.
 		let activeSort: string[] = [];
 		let activeFilter: any = null;
 		let activeSearch: string | null = null;
 
+		activeBookmarkId.value = null;
+
 		try {
 			let preset: any = null;
 
-			const bookmarkId = route.query.bookmark ? String(route.query.bookmark) : null;
+			const bookmarkId = resolveActiveBookmarkId();
 			if (bookmarkId) {
 				const bookmarkRes = await api.get('/presets', {
 					params: {
@@ -120,6 +182,7 @@ async function fetchNavigation() {
 					},
 				});
 				preset = bookmarkRes.data?.data?.[0] ?? null;
+				if (preset) activeBookmarkId.value = bookmarkId;
 			}
 
 			if (!preset) {
@@ -355,8 +418,16 @@ async function fetchNavigation() {
 
 function navigate(id: string | number | null) {
 	if (id !== null && id !== undefined) {
-		// Preserve the current view context (e.g. ?bookmark=<id>) across navigation
-		router.push({ path: `/content/${props.collection}/${id}`, query: route.query });
+		// Preserve the current view context (e.g. ?bookmark=<id>) across navigation.
+		// When the bookmark was recovered from the navigation context rather than
+		// the URL, write it into the query so the context becomes explicit —
+		// shareable and refresh-stable — from the first Prev/Next on.
+		const query: Record<string, any> = { ...route.query };
+		if (activeBookmarkId.value && query.bookmark === undefined) {
+			query.bookmark = activeBookmarkId.value;
+		}
+
+		router.push({ path: `/content/${props.collection}/${id}`, query });
 	}
 }
 
