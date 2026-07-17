@@ -54,7 +54,10 @@ const { useFieldsStore } = useStores();
 const loading = ref(false);
 const prevId = ref<string | number | null>(null);
 const nextId = ref<string | number | null>(null);
-const positionInfo = ref<{ current: number; total: number } | null>(null);
+// `current` is '–' when the open item no longer matches the active view's
+// filters (e.g. it was just processed out of a filtered work queue) — the item
+// then has no position IN the view, but Prev/Next still walk the view.
+const positionInfo = ref<{ current: number | string; total: number } | null>(null);
 
 // The bookmark id whose preset actually resolved for the current view, if any.
 // Used by navigate() to write the context into the URL on Prev/Next, so a
@@ -247,8 +250,14 @@ async function fetchNavigation() {
 
 		// If total count is small (e.g. < 5000), fetch all matching IDs in-memory
 		if (totalCount < 5000) {
+			const primarySort = sortQuery[0] || pkField;
+			const primaryDesc = primarySort.startsWith('-');
+			const sortFieldName = primaryDesc ? primarySort.slice(1) : primarySort;
+
 			const queryParams: any = {
-				fields: [pkField],
+				// Fetch the primary sort value alongside the pk so the fell-out-of-view
+				// case below can compute an insertion point without a second list fetch.
+				fields: sortFieldName === pkField ? [pkField] : [pkField, sortFieldName],
 				sort: sortQuery,
 				limit: -1,
 			};
@@ -259,8 +268,9 @@ async function fetchNavigation() {
 				params: queryParams,
 			});
 
-			const ids: (string | number)[] = (allIdsRes.data?.data || []).map((item: any) => item[pkField]);
-			
+			const rows: any[] = allIdsRes.data?.data || [];
+			const ids: (string | number)[] = rows.map((item: any) => item[pkField]);
+
 			// Normalize current ID for lookup
 			const parsedCurrentId = typeof ids[0] === 'number' ? Number(currentId) : String(currentId);
 			const index = ids.indexOf(parsedCurrentId);
@@ -272,34 +282,67 @@ async function fetchNavigation() {
 					current: index + 1,
 					total: ids.length,
 				};
-			} else {
-				// Fallback if current item doesn't match active filters:
-				// Load unfiltered IDs so navigation still functions
-				const fallbackIdsRes = await api.get(`/items/${props.collection}`, {
-					params: {
-						fields: [pkField],
-						sort: sortQuery,
-						limit: -1,
-					},
-				});
-				const fallbackIds: (string | number)[] = (fallbackIdsRes.data?.data || []).map((item: any) => item[pkField]);
-				const fallbackIndex = fallbackIds.indexOf(parsedCurrentId);
+			} else if (activeFilter || activeSearch) {
+				// The open item no longer matches the active view (typical work-queue
+				// flow: a status change just processed it OUT of the filtered view the
+				// user is triaging). Falling back to unfiltered navigation here silently
+				// dumps the user out of their queue — instead, keep navigating the view:
+				// compute where the item WOULD sit in the filtered list (by its primary
+				// sort value, pk as tiebreaker — the same approximation the large-set
+				// cursor path uses) and offer the view's neighbors around that point.
+				// Gmail-style: you are "between" queue items now, Prev/Next stay in the
+				// queue; the position shows '–' since the item is no longer of the view.
+				let inserted = false;
+				try {
+					const curRes = await api.get(`/items/${props.collection}/${encodeURIComponent(currentId)}`, {
+						params: {
+							fields: sortFieldName === pkField ? [pkField] : [pkField, sortFieldName],
+						},
+					});
+					const curRow = curRes.data?.data;
+					if (curRow) {
+						const curVal = curRow[sortFieldName];
+						// True when `row` sorts after the current item under the active
+						// order. Nulls follow the SQL defaults Directus inherits:
+						// NULLS LAST ascending, NULLS FIRST descending.
+						const sortsAfter = (row: any): boolean => {
+							const rowVal = row[sortFieldName];
+							let cmp: number;
+							if (curVal === rowVal) cmp = 0;
+							else if (curVal === null || curVal === undefined) cmp = 1;
+							else if (rowVal === null || rowVal === undefined) cmp = -1;
+							else cmp = curVal < rowVal ? -1 : 1;
+							if (cmp === 0) cmp = parsedCurrentId < row[pkField] ? -1 : parsedCurrentId > row[pkField] ? 1 : 0;
+							return (primaryDesc ? -cmp : cmp) < 0;
+						};
+						const insertAt = rows.findIndex(sortsAfter);
+						const nextIdx = insertAt === -1 ? rows.length : insertAt;
+						prevId.value = nextIdx > 0 ? ids[nextIdx - 1] : null;
+						nextId.value = nextIdx < ids.length ? ids[nextIdx] : null;
+						positionInfo.value = {
+							current: '–',
+							total: ids.length,
+						};
+						inserted = true;
+					}
+				} catch (err) {
+					console.warn('Could not resolve the current item against the active view:', err);
+				}
 
-				if (fallbackIndex !== -1) {
-					prevId.value = fallbackIndex > 0 ? fallbackIds[fallbackIndex - 1] : null;
-					nextId.value = fallbackIndex < fallbackIds.length - 1 ? fallbackIds[fallbackIndex + 1] : null;
-					positionInfo.value = {
-						current: fallbackIndex + 1,
-						total: fallbackIds.length,
-					};
-				} else {
+				if (!inserted) {
 					prevId.value = null;
 					nextId.value = null;
-					positionInfo.value = {
-						current: 1,
-						total: totalCount || 1,
-					};
+					positionInfo.value = null;
 				}
+			} else {
+				// No active filter/search and still not in the list (deleted item,
+				// permission edge): navigation has nothing reliable to offer.
+				prevId.value = null;
+				nextId.value = null;
+				positionInfo.value = {
+					current: 1,
+					total: totalCount || 1,
+				};
 			}
 		} else {
 			// Fallback for large datasets: cursor-based pagination
