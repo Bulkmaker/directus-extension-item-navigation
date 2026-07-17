@@ -54,7 +54,69 @@ const { useFieldsStore } = useStores();
 const loading = ref(false);
 const prevId = ref<string | number | null>(null);
 const nextId = ref<string | number | null>(null);
-const positionInfo = ref<{ current: number; total: number } | null>(null);
+// `current` is '–' when the open item no longer matches the active view's
+// filters (e.g. it was just processed out of a filtered work queue) — the item
+// then has no position IN the view, but Prev/Next still walk the view.
+const positionInfo = ref<{ current: number | string; total: number } | null>(null);
+
+// The bookmark id whose preset actually resolved for the current view, if any.
+// Used by navigate() to write the context into the URL on Prev/Next, so a
+// recovered context (see resolveActiveBookmarkId) becomes explicit and
+// refresh-stable after the first navigation.
+const activeBookmarkId = ref<string | null>(null);
+
+/**
+ * Extract a bookmark id from a URL/path IF it is this collection's browse view
+ * (e.g. '/content/articles?bookmark=3' or 'https://host/admin/content/articles?bookmark=3').
+ * Anything else — other collections, other origins, no bookmark — yields null.
+ */
+function bookmarkFromViewUrl(url: string | null | undefined): string | null {
+	if (!url) return null;
+	try {
+		const parsed = new URL(url, window.location.origin);
+		if (parsed.origin !== window.location.origin) return null;
+		if (!parsed.pathname.endsWith(`/content/${props.collection}`)) return null;
+		return parsed.searchParams.get('bookmark');
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve the bookmark id of the view the user is actually working in.
+ *
+ * 1. `?bookmark=<id>` in the route — the explicit source (the app's browse→item
+ *    guard carries it over on a normal row click).
+ * 2. vue-router's `history.state.back` — the in-tab origin of this page. Covers
+ *    entries where the URL query is missing, and survives a page refresh (the
+ *    browser persists history entry state across reloads).
+ * 3. `document.referrer` — ONLY when there is no in-tab history yet
+ *    (`history.state.back == null`), i.e. this document is the tab's entry
+ *    point: the item was ctrl/middle-clicked out of the bookmark view into a
+ *    new tab, where neither the query nor history state exists. The referrer is
+ *    also kept by browsers across reloads, so F5 in that tab stays in context.
+ *    After any in-tab navigation the referrer goes stale (it never updates in
+ *    an SPA), hence the guard.
+ *
+ * A recovered id is validated against the presets API by the caller exactly
+ * like an explicit one (collection-guarded; stale/foreign ids fall through to
+ * the default preset).
+ */
+function resolveActiveBookmarkId(): string | null {
+	if (route.query.bookmark) return String(route.query.bookmark);
+
+	const historyBack = typeof history.state?.back === 'string' ? history.state.back : null;
+
+	const fromBack = bookmarkFromViewUrl(historyBack);
+	if (fromBack) return fromBack;
+
+	if (historyBack == null) {
+		const fromReferrer = bookmarkFromViewUrl(document.referrer);
+		if (fromReferrer) return fromReferrer;
+	}
+
+	return null;
+}
 
 const currentPrimaryKey = computed(() => {
 	if (props.primaryKey && props.primaryKey !== '+') {
@@ -98,23 +160,48 @@ async function fetchNavigation() {
 			console.warn('Could not fetch current user info:', err);
 		}
 
-		// 2. Query active preset for this collection and user (stores current sorting/filtering)
+		// 2. Resolve the ACTIVE preset for this view: when the item was opened from a
+		// bookmark (?bookmark=<id> in the route, or recovered from the navigation
+		// context — see resolveActiveBookmarkId), navigate that bookmark's view;
+		// otherwise fall back to the user's/global default preset for the collection.
+		// A stale or foreign bookmark id yields no row and falls through to the default.
 		let activeSort: string[] = [];
 		let activeFilter: any = null;
 		let activeSearch: string | null = null;
 
+		activeBookmarkId.value = null;
+
 		try {
-			const presetParams: any = {
-				filter: {
-					collection: { _eq: props.collection },
-					bookmark: { _null: true },
-				},
-			};
-			if (currentUserId) {
-				presetParams.filter.user = { _eq: currentUserId };
+			let preset: any = null;
+
+			const bookmarkId = resolveActiveBookmarkId();
+			if (bookmarkId) {
+				const bookmarkRes = await api.get('/presets', {
+					params: {
+						filter: {
+							id: { _eq: bookmarkId },
+							collection: { _eq: props.collection },
+						},
+					},
+				});
+				preset = bookmarkRes.data?.data?.[0] ?? null;
+				if (preset) activeBookmarkId.value = bookmarkId;
 			}
-			const presetRes = await api.get('/presets', { params: presetParams });
-			const preset = presetRes.data?.data?.[0];
+
+			if (!preset) {
+				const presetParams: any = {
+					filter: {
+						collection: { _eq: props.collection },
+						bookmark: { _null: true },
+					},
+				};
+				if (currentUserId) {
+					presetParams.filter.user = { _eq: currentUserId };
+				}
+				const presetRes = await api.get('/presets', { params: presetParams });
+				preset = presetRes.data?.data?.[0] ?? null;
+			}
+
 			if (preset) {
 				const layout = preset.layout || 'tabular';
 				const layoutQuery = preset.layout_query?.[layout] || {};
@@ -163,8 +250,14 @@ async function fetchNavigation() {
 
 		// If total count is small (e.g. < 5000), fetch all matching IDs in-memory
 		if (totalCount < 5000) {
+			const primarySort = sortQuery[0] || pkField;
+			const primaryDesc = primarySort.startsWith('-');
+			const sortFieldName = primaryDesc ? primarySort.slice(1) : primarySort;
+
 			const queryParams: any = {
-				fields: [pkField],
+				// Fetch the primary sort value alongside the pk so the fell-out-of-view
+				// case below can compute an insertion point without a second list fetch.
+				fields: sortFieldName === pkField ? [pkField] : [pkField, sortFieldName],
 				sort: sortQuery,
 				limit: -1,
 			};
@@ -175,8 +268,9 @@ async function fetchNavigation() {
 				params: queryParams,
 			});
 
-			const ids: (string | number)[] = (allIdsRes.data?.data || []).map((item: any) => item[pkField]);
-			
+			const rows: any[] = allIdsRes.data?.data || [];
+			const ids: (string | number)[] = rows.map((item: any) => item[pkField]);
+
 			// Normalize current ID for lookup
 			const parsedCurrentId = typeof ids[0] === 'number' ? Number(currentId) : String(currentId);
 			const index = ids.indexOf(parsedCurrentId);
@@ -188,34 +282,67 @@ async function fetchNavigation() {
 					current: index + 1,
 					total: ids.length,
 				};
-			} else {
-				// Fallback if current item doesn't match active filters:
-				// Load unfiltered IDs so navigation still functions
-				const fallbackIdsRes = await api.get(`/items/${props.collection}`, {
-					params: {
-						fields: [pkField],
-						sort: sortQuery,
-						limit: -1,
-					},
-				});
-				const fallbackIds: (string | number)[] = (fallbackIdsRes.data?.data || []).map((item: any) => item[pkField]);
-				const fallbackIndex = fallbackIds.indexOf(parsedCurrentId);
+			} else if (activeFilter || activeSearch) {
+				// The open item no longer matches the active view (typical work-queue
+				// flow: a status change just processed it OUT of the filtered view the
+				// user is triaging). Falling back to unfiltered navigation here silently
+				// dumps the user out of their queue — instead, keep navigating the view:
+				// compute where the item WOULD sit in the filtered list (by its primary
+				// sort value, pk as tiebreaker — the same approximation the large-set
+				// cursor path uses) and offer the view's neighbors around that point.
+				// Gmail-style: you are "between" queue items now, Prev/Next stay in the
+				// queue; the position shows '–' since the item is no longer of the view.
+				let inserted = false;
+				try {
+					const curRes = await api.get(`/items/${props.collection}/${encodeURIComponent(currentId)}`, {
+						params: {
+							fields: sortFieldName === pkField ? [pkField] : [pkField, sortFieldName],
+						},
+					});
+					const curRow = curRes.data?.data;
+					if (curRow) {
+						const curVal = curRow[sortFieldName];
+						// True when `row` sorts after the current item under the active
+						// order. Nulls follow the SQL defaults Directus inherits:
+						// NULLS LAST ascending, NULLS FIRST descending.
+						const sortsAfter = (row: any): boolean => {
+							const rowVal = row[sortFieldName];
+							let cmp: number;
+							if (curVal === rowVal) cmp = 0;
+							else if (curVal === null || curVal === undefined) cmp = 1;
+							else if (rowVal === null || rowVal === undefined) cmp = -1;
+							else cmp = curVal < rowVal ? -1 : 1;
+							if (cmp === 0) cmp = parsedCurrentId < row[pkField] ? -1 : parsedCurrentId > row[pkField] ? 1 : 0;
+							return (primaryDesc ? -cmp : cmp) < 0;
+						};
+						const insertAt = rows.findIndex(sortsAfter);
+						const nextIdx = insertAt === -1 ? rows.length : insertAt;
+						prevId.value = nextIdx > 0 ? ids[nextIdx - 1] : null;
+						nextId.value = nextIdx < ids.length ? ids[nextIdx] : null;
+						positionInfo.value = {
+							current: '–',
+							total: ids.length,
+						};
+						inserted = true;
+					}
+				} catch (err) {
+					console.warn('Could not resolve the current item against the active view:', err);
+				}
 
-				if (fallbackIndex !== -1) {
-					prevId.value = fallbackIndex > 0 ? fallbackIds[fallbackIndex - 1] : null;
-					nextId.value = fallbackIndex < fallbackIds.length - 1 ? fallbackIds[fallbackIndex + 1] : null;
-					positionInfo.value = {
-						current: fallbackIndex + 1,
-						total: fallbackIds.length,
-					};
-				} else {
+				if (!inserted) {
 					prevId.value = null;
 					nextId.value = null;
-					positionInfo.value = {
-						current: 1,
-						total: totalCount || 1,
-					};
+					positionInfo.value = null;
 				}
+			} else {
+				// No active filter/search and still not in the list (deleted item,
+				// permission edge): navigation has nothing reliable to offer.
+				prevId.value = null;
+				nextId.value = null;
+				positionInfo.value = {
+					current: 1,
+					total: totalCount || 1,
+				};
 			}
 		} else {
 			// Fallback for large datasets: cursor-based pagination
@@ -334,7 +461,16 @@ async function fetchNavigation() {
 
 function navigate(id: string | number | null) {
 	if (id !== null && id !== undefined) {
-		router.push(`/content/${props.collection}/${id}`);
+		// Preserve the current view context (e.g. ?bookmark=<id>) across navigation.
+		// When the bookmark was recovered from the navigation context rather than
+		// the URL, write it into the query so the context becomes explicit —
+		// shareable and refresh-stable — from the first Prev/Next on.
+		const query: Record<string, any> = { ...route.query };
+		if (activeBookmarkId.value && query.bookmark === undefined) {
+			query.bookmark = activeBookmarkId.value;
+		}
+
+		router.push({ path: `/content/${props.collection}/${id}`, query });
 	}
 }
 
